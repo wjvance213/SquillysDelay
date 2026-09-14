@@ -19,13 +19,35 @@ SquillysDelayAudioProcessor::SquillysDelayAudioProcessor()
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ),
+       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
+#else
+     : apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 #endif
 {
+    // Look the parameter up by ID exactly once, here on the message thread, and
+    // keep the pointer. From now on the audio thread just reads the atomic.
+    gainParameter = apvts.getRawParameterValue ("gain");
 }
 
 SquillysDelayAudioProcessor::~SquillysDelayAudioProcessor()
 {
+}
+
+//==============================================================================
+juce::AudioProcessorValueTreeState::ParameterLayout SquillysDelayAudioProcessor::createParameterLayout()
+{
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "gain", 1 },            // ID used in code + version hint for future changes
+        "Gain",                                     // name the host shows the user
+        juce::NormalisableRange<float> (-48.0f,     // minimum, in decibels
+                                          6.0f,     // maximum, in decibels
+                                          0.1f),    // step size
+        0.0f));                                     // default: 0 dB = unity, no change
+
+    return layout;
 }
 
 //==============================================================================
@@ -93,8 +115,12 @@ void SquillysDelayAudioProcessor::changeProgramName (int index, const juce::Stri
 //==============================================================================
 void SquillysDelayAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
+    juce::ignoreUnused (sampleRate, samplesPerBlock);
+
+    // Start the ramp from wherever the knob currently sits, so the very first
+    // block after playback starts doesn't sweep up from silence (or down from a
+    // stale value left over from the last time this instance played).
+    lastGain = juce::Decibels::decibelsToGain (gainParameter->load());
 }
 
 void SquillysDelayAudioProcessor::releaseResources()
@@ -138,24 +164,20 @@ void SquillysDelayAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     // In case we have more outputs than inputs, this code clears any output
     // channels that didn't contain input data, (because these aren't
     // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
+    // The knob's position, in dB, as of right now. The host may have changed it
+    // since the last block, either from the GUI or from an automation clip.
+    const auto targetGain = juce::Decibels::decibelsToGain (gainParameter->load());
 
-        // ..do something to the data...
-    }
+    // Slide smoothly from last block's gain to this one's across the whole
+    // buffer, on every channel at once. A knob move therefore becomes a short
+    // fade instead of a step discontinuity, which is what a click actually is.
+    buffer.applyGainRamp (0, buffer.getNumSamples(), lastGain, targetGain);
+
+    // Remember where the ramp ended so the next block picks up seamlessly.
+    lastGain = targetGain;
 }
 
 //==============================================================================
@@ -166,21 +188,28 @@ bool SquillysDelayAudioProcessor::hasEditor() const
 
 juce::AudioProcessorEditor* SquillysDelayAudioProcessor::createEditor()
 {
-    return new SquillysDelayAudioProcessorEditor (*this);
+    // JUCE builds a plain GUI automatically from whatever is in the APVTS. Free
+    // controls for every parameter we add, which keeps the focus on DSP until
+    // the custom editor step at the end of the roadmap.
+    return new juce::GenericAudioProcessorEditor (*this);
 }
 
 //==============================================================================
 void SquillysDelayAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
+    // The APVTS keeps every parameter in a ValueTree, so saving the whole plugin
+    // state is just: tree -> XML -> the block of bytes the host hands us.
+    if (auto xml = apvts.copyState().createXml())
+        copyXmlToBinary (*xml, destData);
 }
 
 void SquillysDelayAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
+    // ...and loading is the same trip in reverse. The tag-name check guards
+    // against a host handing us a block written by some other plugin.
+    if (auto xml = getXmlFromBinary (data, sizeInBytes))
+        if (xml->hasTagName (apvts.state.getType()))
+            apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
 //==============================================================================
