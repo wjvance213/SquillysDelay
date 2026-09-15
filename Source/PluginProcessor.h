@@ -80,23 +80,37 @@ private:
     float lastGain = 1.0f;
 
     //==============================================================================
-    // Delay core (step 3) — values hardcoded for now; they become knobs in step 4
+    // Delay core (steps 3 + 4)
     //==============================================================================
 
-    // How far back in time the read head sits behind the write head.
-    static constexpr float delayTimeMs = 500.0f;
-
-    // How much of each echo is fed back in to become the next echo. Must stay
-    // below 1.0: at 1.0 the loop never loses energy, above it the level grows
-    // every pass and runs away.
-    static constexpr float feedbackAmount = 0.4f;
-
-    // 0.0 = dry signal only, 1.0 = echoes only.
-    static constexpr float wetMix = 0.5f;
-
     // How much delay-line headroom to allocate, independent of the current delay
-    // time, so the buffer never has to be resized when the time knob arrives.
+    // time, so the buffer never has to be resized when the time knob moves.
+    // Also sets the top of the "time" parameter's range.
     static constexpr double maxDelaySeconds = 2.0;
+
+    // The three delay knobs, read the same lock-free way as gain. Each is cached
+    // once in the constructor and never looked up by name on the audio thread.
+    //
+    //   time     - how far back the read head sits behind the write head, in ms
+    //   feedback - how much of each echo is fed back in to become the next echo;
+    //              the parameter range caps it below 1.0 so the loop always loses
+    //              energy and can never run away
+    //   mix      - 0.0 = dry signal only, 1.0 = echoes only
+    std::atomic<float>* timeParameter     = nullptr;
+    std::atomic<float>* feedbackParameter = nullptr;
+    std::atomic<float>* mixParameter      = nullptr;
+
+    // Feedback and mix are applied per sample, so a knob move would otherwise be
+    // a step change on every sample from then on - a zipper click. SmoothedValue
+    // turns setTargetValue() into a short linear ramp that getNextValue() walks
+    // one sample at a time. (Time is deliberately not smoothed yet: moving an
+    // integer read head still jumps; the fix is fractional reads in step 5.)
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> feedbackSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> mixSmoothed;
+
+    // How long the feedback / mix ramps take. Long enough to hide a click,
+    // short enough that the knob still feels immediate.
+    static constexpr double parameterRampSeconds = 0.02;
 
     // The delay line itself: one long buffer per channel that we treat as a
     // circle. Sized once in prepareToPlay, never on the audio thread.

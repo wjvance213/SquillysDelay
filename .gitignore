@@ -11,3 +11,6 @@ JuceLibraryCode/
 # OS junk
 Thumbs.db
 .DS_Store
+
+# Local working notes for the AI assistant
+CLAUDE.md
