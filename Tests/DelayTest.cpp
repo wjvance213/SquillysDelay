@@ -213,6 +213,32 @@ int main()
         ++sectionsRun;
     }
 
+    // ---- Section 6: tempo sync overrides the ms knob -------------------------
+    if (SquillysDelayAudioProcessor().apvts.getParameter ("sync") != nullptr)
+    {
+        std::printf ("[6] tempo sync: 1/4 note with no host playhead -> 120 BPM fallback = 500 ms\n");
+        SquillysDelayAudioProcessor proc;
+        setParam (proc, "time", 250.0f);     // should be ignored while sync is on
+        setParam (proc, "sync", 1.0f);
+        setParam (proc, "division", 8.0f);   // index of "1/4" in the division list
+        setParam (proc, "feedback", 0.5f);
+        setParam (proc, "mix", 0.5f);
+        proc.setPlayConfigDetails (2, 2, sr, blockSize);
+        proc.prepareToPlay (sr, blockSize);
+
+        // No playhead in this harness, so the processor keeps its initial 120 BPM:
+        // one quarter note = 60000 / 120 = 500 ms.
+        const int D = juce::roundToInt (500.0 * 0.001 * sr);
+        auto out = runImpulse (proc, sr, blockSize, totalSamples);
+        checkEchoes (out, D, 0.5f, 0.5f, 1.0f, totalSamples / D);
+        proc.releaseResources();
+        ++sectionsRun;
+    }
+    else
+    {
+        std::printf ("[6] skipped: no sync parameter yet\n");
+    }
+
     std::printf ("%d sections, %d failures -> %s\n", sectionsRun, failures, failures == 0 ? "PASS" : "FAIL");
     return failures == 0 ? 0 : 1;
 }

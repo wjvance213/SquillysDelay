@@ -10,6 +10,44 @@
 #include "PluginEditor.h"
 
 //==============================================================================
+namespace
+{
+    // The note lengths the "division" parameter can pick from, in the order the
+    // host will list them. Each is expressed in quarter notes (beats), because a
+    // beat is the unit tempo is measured in: at N BPM one quarter note lasts
+    // 60000 / N ms, so any division is just that scaled by its quarterNotes.
+    //
+    //   T = triplet: three fit where two plain notes would, so 2/3 the length
+    //   D = dotted:  the plain note plus half again, so 1.5x the length
+    struct NoteDivision
+    {
+        const char* label;
+        double      quarterNotes;
+    };
+
+    constexpr NoteDivision noteDivisions[] =
+    {
+        { "1/32",  0.125 },
+        { "1/16T", 0.25 * 2.0 / 3.0 },
+        { "1/16",  0.25 },
+        { "1/16D", 0.25 * 1.5 },
+        { "1/8T",  0.5 * 2.0 / 3.0 },
+        { "1/8",   0.5 },
+        { "1/8D",  0.5 * 1.5 },
+        { "1/4T",  1.0 * 2.0 / 3.0 },
+        { "1/4",   1.0 },
+        { "1/4D",  1.0 * 1.5 },
+        { "1/2T",  2.0 * 2.0 / 3.0 },
+        { "1/2",   2.0 },
+        { "1/2D",  2.0 * 1.5 },
+        { "1/1",   4.0 },
+    };
+
+    constexpr int numNoteDivisions    = juce::numElementsInArray (noteDivisions);
+    constexpr int defaultNoteDivision = 5;   // "1/8"
+}
+
+//==============================================================================
 SquillysDelayAudioProcessor::SquillysDelayAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
      : AudioProcessor (BusesProperties()
@@ -31,6 +69,8 @@ SquillysDelayAudioProcessor::SquillysDelayAudioProcessor()
     timeParameter     = apvts.getRawParameterValue ("time");
     feedbackParameter = apvts.getRawParameterValue ("feedback");
     mixParameter      = apvts.getRawParameterValue ("mix");
+    syncParameter     = apvts.getRawParameterValue ("sync");
+    divisionParameter = apvts.getRawParameterValue ("division");
 }
 
 SquillysDelayAudioProcessor::~SquillysDelayAudioProcessor()
@@ -78,6 +118,28 @@ juce::AudioProcessorValueTreeState::ParameterLayout SquillysDelayAudioProcessor:
         "Mix",
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.01f),
         0.5f));
+
+    // Tempo sync on/off. An AudioParameterBool is a parameter with exactly two
+    // states; the generic editor draws it as a toggle button, and the host
+    // treats it as an on/off automation lane.
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "sync", 1 },
+        "Tempo Sync",
+        false));
+
+    // Note division, only used while sync is on. An AudioParameterChoice is an
+    // integer index that the host displays using the strings we give it, so
+    // its label list is built straight from the noteDivisions table to keep
+    // the two in step.
+    juce::StringArray divisionLabels;
+    for (const auto& division : noteDivisions)
+        divisionLabels.add (division.label);
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "division", 1 },
+        "Division",
+        divisionLabels,
+        defaultNoteDivision));
 
     return layout;
 }
@@ -235,11 +297,37 @@ void SquillysDelayAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer
     if (numSamples == 0 || delayBufferSize == 0)
         return;
 
+    // Which delay time to use this block, in milliseconds: the time knob, or
+    // a note length worked out from the host tempo when sync is on.
+    double delayMilliseconds = timeParameter->load();
+
+    if (syncParameter->load() > 0.5f)
+    {
+        // Ask the host where its transport is. getPlayHead() is the host's
+        // window into that: it can be null (no host, as in the offline test),
+        // getPosition() can come back empty, and the position may not carry a
+        // tempo, so every hop is an Optional we check before dereferencing.
+        if (auto* playHead = getPlayHead())
+            if (auto position = playHead->getPosition())
+                if (auto bpm = position->getBpm())
+                    if (*bpm > 0.0)
+                        lastKnownBpm = *bpm;
+
+        // The choice parameter's raw value is its index, stored as a float.
+        const auto divisionIndex = juce::jlimit (0, numNoteDivisions - 1,
+                                                 juce::roundToInt (divisionParameter->load()));
+
+        // One quarter note is 60000 / BPM ms; scale by how many quarter notes
+        // the chosen division is. A slow tempo with a long division can exceed
+        // the buffer; the jlimit below clamps that to the maximum delay.
+        delayMilliseconds = noteDivisions[divisionIndex].quarterNotes * 60000.0 / lastKnownBpm;
+    }
+
     // Milliseconds -> whole samples, read once per block. Clamped so the read
     // head can never land on the write head (a 0-sample delay) or lap it
     // (>= buffer size).
     const auto delayInSamples = juce::jlimit (1, delayBufferSize - 1,
-                                              juce::roundToInt (timeParameter->load() * 0.001 * currentSampleRate));
+                                              juce::roundToInt (delayMilliseconds * 0.001 * currentSampleRate));
 
     // Point the smoothers at the knobs' latest positions. If nothing moved this
     // is a no-op; if something did, the ramp starts from wherever it is now.

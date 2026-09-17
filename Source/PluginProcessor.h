@@ -100,6 +100,20 @@ private:
     std::atomic<float>* feedbackParameter = nullptr;
     std::atomic<float>* mixParameter      = nullptr;
 
+    // Tempo sync. While "sync" is on the time knob is ignored and the delay is
+    // a note length worked out from the host's tempo instead:
+    //
+    //   sync     - AudioParameterBool; the raw value is 0.0 (off) or 1.0 (on)
+    //   division - AudioParameterChoice; the raw value is the *index* of the
+    //              chosen entry in the noteDivisions table in the .cpp
+    std::atomic<float>* syncParameter     = nullptr;
+    std::atomic<float>* divisionParameter = nullptr;
+
+    // The last tempo the host reported. A host doesn't have to report one every
+    // block (and the offline test has no host at all), so when it's missing we
+    // keep using the previous value rather than snapping to some default.
+    double lastKnownBpm = 120.0;
+
     // Feedback and mix are applied per sample, so a knob move would otherwise be
     // a step change on every sample from then on - a zipper click. SmoothedValue
     // turns setTargetValue() into a short linear ramp that getNextValue() walks
